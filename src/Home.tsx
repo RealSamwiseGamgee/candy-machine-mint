@@ -6,7 +6,8 @@ import Alert from "@material-ui/lab/Alert";
 
 import * as anchor from "@project-serum/anchor";
 
-import { LAMPORTS_PER_SOL } from "@solana/web3.js";
+import { LAMPORTS_PER_SOL, PublicKey } from "@solana/web3.js";
+import { TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID, Token } from "@solana/spl-token";
 
 import { useAnchorWallet } from "@solana/wallet-adapter-react";
 import { WalletDialogButton } from "@solana/wallet-adapter-material-ui";
@@ -41,6 +42,8 @@ const Home = (props: HomeProps) => {
   const [isActive, setIsActive] = useState(false); // true when countdown completes
   const [isSoldOut, setIsSoldOut] = useState(false); // true when items remaining is zero
   const [isMinting, setIsMinting] = useState(false); // true when user got to press MINT
+  const [tokenMint, setTokenMint] = useState<PublicKey | undefined>(undefined); // Custom spl token for mint price. Typically undefined
+  const [associatedTokenAccountAddress, setAssociatedTokenAccountAddress] = useState<PublicKey | undefined>(undefined); // Associated token for custom spl mint
 
   const [itemsAvailable, setItemsAvailable] = useState(0);
   const [itemsRedeemed, setItemsRedeemed] = useState(0);
@@ -57,6 +60,36 @@ const Home = (props: HomeProps) => {
   const wallet = useAnchorWallet();
   const [candyMachine, setCandyMachine] = useState<CandyMachine>();
 
+  const updateBalance = async () => {
+    if (wallet?.publicKey) {
+      if (tokenMint && associatedTokenAccountAddress) {
+        const token = new Token(
+          props.connection,
+          tokenMint,
+          TOKEN_PROGRAM_ID,
+          // @ts-ignore
+          wallet,
+        );
+        const mintInfo = await token.getMintInfo();
+        console.log("-- mintInfo: ", mintInfo);
+        console.log("-- mintInfo.mintAuthority: ", mintInfo.mintAuthority);
+        // console.log(mintInfo.mintAuthority.toString());
+        try {
+          const associatedTokenAccountInfo = await token.getAccountInfo(associatedTokenAccountAddress);
+          console.log("-- associatedTokenAccountInfo: ", associatedTokenAccountInfo);
+          console.log("-- associatedTokenAccountInfo.amount: ", associatedTokenAccountInfo.amount.toNumber());
+          console.log("-- associatedTokenAccountInfo.amount: ", associatedTokenAccountInfo.amount.toNumber() / 10 ** mintInfo.decimals);
+          setBalance(associatedTokenAccountInfo.amount.toNumber() / 10 ** mintInfo.decimals);
+        } catch (err) {
+          setBalance(0);
+        }
+        return;
+      }
+      const balance = await props.connection.getBalance(wallet.publicKey);
+      setBalance(balance / LAMPORTS_PER_SOL);
+    }
+  }
+
   const refreshCandyMachineState = () => {
     (async () => {
       if (!wallet) return;
@@ -67,6 +100,7 @@ const Home = (props: HomeProps) => {
         itemsAvailable,
         itemsRemaining,
         itemsRedeemed,
+        tokenMint,
       } = await getCandyMachineState(
         wallet as anchor.Wallet,
         props.candyMachineId,
@@ -79,6 +113,19 @@ const Home = (props: HomeProps) => {
 
       setIsSoldOut(itemsRemaining === 0);
       setStartDate(goLiveDate);
+
+      if (tokenMint) {
+        const associatedTokenAccountAddress = await Token.getAssociatedTokenAddress(
+          ASSOCIATED_TOKEN_PROGRAM_ID,
+          TOKEN_PROGRAM_ID,
+          tokenMint,
+          wallet.publicKey
+        )
+        setTokenMint(tokenMint);
+        setAssociatedTokenAccountAddress(associatedTokenAccountAddress);
+        console.log("-- associatedTokenAccountAddress: ", associatedTokenAccountAddress.toString());
+      }
+
       setCandyMachine(candyMachine);
     })();
   };
@@ -91,7 +138,8 @@ const Home = (props: HomeProps) => {
           candyMachine,
           props.config,
           wallet.publicKey,
-          props.treasury
+          props.treasury,
+          associatedTokenAccountAddress
         );
 
         const status = await awaitTransactionSignatureConfirmation(
@@ -119,6 +167,7 @@ const Home = (props: HomeProps) => {
     } catch (error: any) {
       // TODO: blech:
       let message = error.msg || "Minting failed! Please try again!";
+      console.log("-- error: ", message);
       if (!error.msg) {
         if (error.message.indexOf("0x138")) {
         } else if (error.message.indexOf("0x137")) {
@@ -142,8 +191,9 @@ const Home = (props: HomeProps) => {
       });
     } finally {
       if (wallet) {
-        const balance = await props.connection.getBalance(wallet.publicKey);
-        setBalance(balance / LAMPORTS_PER_SOL);
+        await updateBalance();
+        // const balance = await props.connection.getBalance(wallet.publicKey);
+        // setBalance(balance / LAMPORTS_PER_SOL);
       }
       setIsMinting(false);
       refreshCandyMachineState();
@@ -153,11 +203,12 @@ const Home = (props: HomeProps) => {
   useEffect(() => {
     (async () => {
       if (wallet) {
-        const balance = await props.connection.getBalance(wallet.publicKey);
-        setBalance(balance / LAMPORTS_PER_SOL);
+        await updateBalance();
+        // const balance = await props.connection.getBalance(wallet.publicKey);
+        // setBalance(balance / LAMPORTS_PER_SOL);
       }
     })();
-  }, [wallet, props.connection]);
+  }, [wallet, props.connection, tokenMint]);
 
   useEffect(refreshCandyMachineState, [
     wallet,
@@ -171,7 +222,7 @@ const Home = (props: HomeProps) => {
         <p>Wallet {shortenAddress(wallet.publicKey.toBase58() || "")}</p>
       )}
 
-      {wallet && <p>Balance: {(balance || 0).toLocaleString()} SOL</p>}
+      {wallet && <p>Balance: {(balance || 0).toLocaleString()} {tokenMint ? "" : "SOL"}</p>}
 
       {wallet && <p>Total Available: {itemsAvailable}</p>}
 
